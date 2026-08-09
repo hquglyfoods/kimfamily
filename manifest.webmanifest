@@ -1,0 +1,16 @@
+{
+  "name": "우리집 도장판",
+  "short_name": "도장판",
+  "start_url": "https://kimfam.netlify.app/",
+  "scope": "https://kimfam.netlify.app/",
+  "display": "standalone",
+  "background_color": "#6C4CE0",
+  "theme_color": "#6C4CE0",
+  "icons": [
+    {
+      "src": "https://glifusercontent.com/i:r/rxj3rjaoi1hx433rfpcx.jpg",
+      "sizes": "1024x1024",
+      "type": "image/jpeg"
+    }
+  ]
+}
