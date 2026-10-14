@@ -25,6 +25,12 @@ p{color:#EADFFF;font-size:14.5px;margin:0}
 button{margin-top:20px;background:#fff;color:#6C4CE0;font-family:'Jua';font-size:17px;
   padding:13px 26px;border:none;border-radius:15px;box-shadow:0 5px 0 rgba(0,0,0,.18)}
 </style>
+<style id="touch-fx">
+/* Touch feel: no grey/blue tap flash, no double-tap-zoom delay on controls, light press feedback on touch screens only. Invisible at rest. */
+html{-webkit-tap-highlight-color:transparent}
+a,button,input,select,textarea,label,summary,[role=button],[onclick]{touch-action:manipulation}
+@media (hover:none){button:not(:disabled):active,a:active,[role=button]:active{opacity:.72}}
+</style>
 </head>
 <body>
 <h1>⭐ 우리집 도장판</h1>
