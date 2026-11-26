@@ -627,7 +627,7 @@ const VAPID_PUBLIC='BG78jPzaPRbWS-MyP2_rBWwnPGtaO-0kBWSmwXyp4gVPk-QqD5VOU76jOQmT
 
 const $=id=>document.getElementById(id);
 const esc=s=>(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let ME=null, USERS=[], KIDS=[], PARENTS=[], VIEW='home', STATE={balances:{},warnings:[],kings:[],tasks:[],tickets:[],notis:[],items:[],events:[],reports:[]};
+let ME=null, USERS=[], KIDS=[], PARENTS=[], VIEW='home', STATE={balances:{},warnings:[],kings:[],tasks:[],tickets:[],notis:[],items:[],events:[],reports:[],noSchoolDays:[]};
 
 async function sha256(t){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(t));
   return[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');}
@@ -768,7 +768,7 @@ async function refresh(){
   }
 }
 async function refreshCore(){
-  const [ev,wn,kg,tk,tc,nt,it,rp,stk,sad,msn,run,inv,strk,fin,gld,allIt,balV,sbalV,tkOpen]=await Promise.all([
+  const [ev,wn,kg,tk,tc,nt,it,rp,stk,sad,msn,run,inv,strk,fin,gld,allIt,balV,sbalV,tkOpen,ns]=await Promise.all([
     sb.from('fam_stamp_events').select('*').order('created_at',{ascending:false}).limit(300),
     sb.from('fam_warnings').select('*').order('created_at',{ascending:false}),
     sb.from('fam_king_warnings').select('*').order('created_at',{ascending:false}),
@@ -789,6 +789,7 @@ async function refreshCore(){
     sb.from('fam_balances').select('*'),
     sb.from('fam_sticker_balances').select('*'),
     sb.from('fam_tasks').select('*').neq('status','confirmed').order('created_at',{ascending:false}),
+    sb.from('fam_no_school_days').select('*').or('status.eq.pending,and(status.eq.approved,day_date.gte.'+nyDayKey()+')').order('day_date'),
   ]);
   if(ev.error||balV.error) throw new Error('network');
   STATE.events=ev.data||[];STATE.warnings=wn.data||[];STATE.kings=kg.data||[];
@@ -796,6 +797,7 @@ async function refreshCore(){
   STATE.tasks=[...(tkOpen.data||[]),...(tk.data||[])].filter(x=>seen.has(x.id)?false:seen.add(x.id));STATE.tickets=tc.data||[];STATE.notis=nt.data||[];STATE.items=it.data||[];
   STATE.reports=rp.data||[];STATE.stickers=stk.data||[];STATE.sads=sad.data||[];
   STATE.missions=msn.data||[];STATE.runs=run.data||[];STATE.invests=inv.data||[];STATE.streaks=strk.data||[];STATE.fines=fin.data||[];STATE.golds=gld.data||[];STATE.allItems=allIt.data||[];
+  if(!ns.error)STATE.noSchoolDays=ns.data||[];
   STATE.balances={};STATE.stickerBal={};
   // 잔액은 DB가 전체 원장을 합산한 값을 쓴다.
   // (이벤트 목록은 최근 300건만 불러오므로 그것으로 합산하면 오래된 적립이 누락된다)
@@ -822,7 +824,7 @@ function saveOffline(){
       users:USERS.map(u=>({id:u.id,display_name:u.display_name,role:u.role,emoji:u.emoji,avatar_url:u.avatar_url,settings:u.settings})),
       state:{events:STATE.events,warnings:STATE.warnings,kings:STATE.kings,tasks:STATE.tasks,
         tickets:STATE.tickets,notis:STATE.notis,items:STATE.items,reports:STATE.reports,
-        stickers:STATE.stickers,sads:STATE.sads,allItems:STATE.allItems,
+        stickers:STATE.stickers,sads:STATE.sads,allItems:STATE.allItems,noSchoolDays:STATE.noSchoolDays,
         balances:STATE.balances,stickerBal:STATE.stickerBal}
     }));
   }catch(e){}
@@ -2253,36 +2255,129 @@ async function buyWithGold(id){await guard(async()=>{
     mins>0?`골드로 바꿔서 ${mins}분 시작`:'골드로 바꿈','shop');
   toast(it.emoji,mins>0?`🏅 사용! ${mins}분 시작`:'🏅 사용!');await refresh();
 });}
-/* ===== 주말 화면시간 제한 =====
-   게임·휴대폰 티켓은 토·일요일에만, 하루 합쳐서 2시간까지. */
+/* ===== 학교 없는 날과 주말 상점 ===== */
 const WEEKEND_CAP_MIN=120;
-function isWeekend(d){ const x=d?new Date(d):new Date(); const w=x.getDay(); return w===0||w===6||(w===5&&x.getHours()>=18); }
-/* 오늘 이미 산 주말제한 상품의 분 합계 */
-function weekendUsedMin(id){
-  const today=dayKey(Date.now());
-  return (STATE.tickets||[]).filter(t=>t.child_id===(id||ME.id)
-      && dayKey(t.purchased_at)===today && !t.paid_gold)
+const NY_SHOP_CLOCK=new Intl.DateTimeFormat('en-US',{
+  timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',
+  hour:'2-digit',hourCycle:'h23',weekday:'short'
+});
+function nyShopParts(d){
+  return Object.fromEntries(NY_SHOP_CLOCK.formatToParts(new Date(d)).map(p=>[p.type,p.value]));
+}
+function nyDayKey(d=Date.now()){
+  const {year,month,day}=nyShopParts(d);
+  return `${year}-${month}-${day}`;
+}
+function isWeekend(d=Date.now()){
+  const {weekday,hour}=nyShopParts(d);
+  return weekday==='Sun'||weekday==='Sat'||(weekday==='Fri'&&Number(hour)>=18);
+}
+function familyNoSchool(dateStr){
+  return STATE.noSchoolDays.find(r=>r.day_date===dateStr&&(r.status==='pending'||r.status==='approved'))||null;
+}
+function isShopWeekend(d=Date.now()){
+  return isWeekend(d)||familyNoSchool(nyDayKey(d))?.status==='approved';
+}
+function weekendUsedMin(id,d=Date.now()){
+  const today=nyDayKey(d);
+  return STATE.tickets.filter(t=>t.child_id===id&&t.purchased_at
+      &&nyDayKey(t.purchased_at)===today&&!t.paid_gold)
     .reduce((s,t)=>{
-      const it=(STATE.allItems||STATE.items||[]).find(x=>x.id===t.item_id);
-      return s + ((it&&it.weekend_only)?(Number(it.timer_minutes)||60):0);
+      const it=(STATE.allItems||STATE.items).find(x=>x.id===t.item_id);
+      return s+(it?.weekend_only?Number(it.timer_minutes??60):0);
     },0);
 }
-/* 살 수 있는지 판정: null이면 가능, 아니면 이유 */
-/* 아이마다 예외를 둘 수 있다 (예: 린아는 평일에도 게임 가능, 하루 3시간) */
 function kidRule(id){
-  const u=USERS.find(x=>x.id===(id||ME.id));
-  const s=(u&&u.settings)||{};
-  return { weekdayOk: !!s.weekday_ok,
-           cap: Number(s.daily_cap_min)||WEEKEND_CAP_MIN };
+  const s=USERS.find(x=>x.id===id)?.settings||{};
+  return {weekdayOk:String(s.weekday_ok)==='true',cap:Number(s.daily_cap_min??WEEKEND_CAP_MIN)};
 }
-function weekendBlock(it){
-  if(!it||!it.weekend_only)return null;
+function weekendBlock(it,d=Date.now()){
+  if(!it?.weekend_only)return null;
   const r=kidRule(ME.id);
-  if(!isWeekend()&&!r.weekdayOk)return {why:'weekday'};
-  const used=weekendUsedMin(ME.id), add=Number(it.timer_minutes)||60;
-  if(used+add>r.cap)return {why:'cap',used,add,cap:r.cap};
+  if(!isShopWeekend(d)&&!r.weekdayOk)return {why:'weekday'};
+  const used=weekendUsedMin(ME.id,d), add=Number(it.timer_minutes??60);
+  if(used+add>r.cap)return {why:'cap',cap:r.cap};
   return null;
 }
+const SHOP_WEEKDAY_MESSAGE='주말이나 승인된 학교 없는 날에 살 수 있어요.';
+function shopCapMessage(cap){
+  return `오늘 살 수 있는 시간이 모자라요. 하루 ${cap}분까지 살 수 있어요.`;
+}
+let noSchoolDate='';
+function noSchoolFeedback(date){
+  if(!date||date<nyDayKey())return '오늘이나 앞으로의 날짜를 골라 주세요.';
+  const existing=familyNoSchool(date);
+  if(existing?.status==='approved')return '학교 없는 날로 승인됐어요. 그날은 세 명 모두 주말처럼 살 수 있어요.';
+  if(existing?.status==='pending')return `${nameOf(existing.requested_by)} 님이 이미 신청했어요. 엄마 아빠 확인을 기다리고 있어요.`;
+  // The picker holds a calendar date. UTC keeps its weekday independent of the device timezone.
+  const weekday=new Date(date+'T00:00:00Z').getUTCDay();
+  if(!Number.isFinite(weekday))return '날짜를 골라 주세요.';
+  return weekday===0||weekday===6?'토요일과 일요일에는 신청할 필요가 없어요.':'';
+}
+function changeNoSchoolDate(date){
+  noSchoolDate=date;
+  const feedback=noSchoolFeedback(date);
+  $('noSchoolFeedback').textContent=feedback;
+  $('noSchoolSubmit').disabled=!!feedback;
+}
+function childNoSchoolCard(today){
+  const date=noSchoolDate||today;
+  const feedback=noSchoolFeedback(date);
+  const approvedToday=familyNoSchool(today)?.status==='approved';
+  return `<div class="card"><h3>🗓️ 학교 없는 날</h3>
+    ${approvedToday?'<p>오늘은 학교 없는 날이에요. 세 명 모두 주말처럼 살 수 있어요.</p>':''}
+    <label for="noSchoolDay">학교에 안 가는 날짜</label>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <input type="date" id="noSchoolDay" min="${today}" value="${esc(date)}" onchange="changeNoSchoolDate(this.value)">
+      <button class="sBtn mint" id="noSchoolSubmit" ${feedback?'disabled':''} onclick="requestNoSchoolDay()">신청하기</button>
+    </div>
+    <div id="noSchoolFeedback" role="status" style="font-size:13px;color:var(--sub);margin-top:6px">${esc(feedback)}</div>
+  </div>`;
+}
+async function requestNoSchoolDay(){await guard(async()=>{
+  if(isParent(ME))return;
+  const date=$('noSchoolDay')?.value;
+  const feedback=noSchoolFeedback(date);
+  if(feedback){toast('🗓️',feedback);return;}
+  const {error}=await sb.from('fam_no_school_days').insert({day_date:date,status:'pending',requested_by:ME.id});
+  if(error){
+    if(error.code==='23505'){
+      await refresh();
+      toast('🗓️',familyNoSchool(date)?noSchoolFeedback(date):'이미 신청한 날짜예요. 날짜를 골라 신청 내용을 확인해 주세요.');
+    }else toast('🗓️','신청하지 못했어요. 다시 시도해 주세요.');
+    return;
+  }
+  await notifyParents('🗓️',`${ME.display_name} 님의 학교 없는 날 신청`,`${date} 신청을 확인해 주세요.`);
+  toast('🗓️','신청했어요. 엄마 아빠가 확인할 거예요.');
+  await refresh();
+});}
+function parentNoSchoolCard(){
+  const pending=STATE.noSchoolDays.filter(r=>r.status==='pending');
+  if(!pending.length)return '';
+  return `<div class="card"><h3>🗓️ 학교 없는 날 신청</h3>
+    ${pending.map(r=>`<div style="margin-top:10px">
+      <div>${esc(r.day_date)} · ${esc(nameOf(r.requested_by))}</div>
+      <div style="display:flex;gap:8px;margin-top:5px">
+        <button class="sBtn mint" onclick="decideNoSchoolDay('${r.id}',true)">승인</button>
+        <button class="sBtn gray" onclick="decideNoSchoolDay('${r.id}',false)">거절</button>
+      </div>
+    </div>`).join('')}
+  </div>`;
+}
+async function decideNoSchoolDay(id,approved){await guard(async()=>{
+  if(!isParent(ME))return;
+  const decision=approved?{status:'approved',approved_by:ME.id}:{status:'denied',denied_by:ME.id};
+  const {data,error}=await sb.from('fam_no_school_days').update(decision)
+    .eq('id',id).eq('status','pending').select('day_date');
+  if(error){toast('🗓️','처리하지 못했어요. 다시 시도해 주세요.');return;}
+  if(!data.length){toast('🗓️','이미 확인한 신청이에요.');await refresh();return;}
+  const date=data[0].day_date;
+  const title=approved?'학교 없는 날로 승인됐어요':'학교 없는 날 신청이 거절됐어요';
+  const body=approved?`${date}에는 세 명 모두 주말처럼 상점에서 살 수 있어요.`:`${date} 신청이 거절됐어요.`;
+  await notify(KIDS.map(k=>k.id),'🗓️',title,body);
+  toast('🗓️',title);
+  await refresh();
+});}
 /* ===== 티켓 타이머 =====
    부모가 사용 처리한 순간부터 시작. 종료 시각을 저장해 두므로 앱을 닫아도 정확하다. */
 function activeTimers(id){
@@ -2535,7 +2630,7 @@ function repItem(r,parentBtns=false){
 
 /* ---- parent home ---- */
 function parentHome(){
-  let h=offlineBanner()+notiBanner();
+  let h=offlineBanner()+notiBanner()+parentNoSchoolCard();
   const kingsAll=STATE.kings.filter(k=>k.status==='active');
   kingsAll.forEach(k=>{
     h+=`<div class="kingBanner"><span class="k">🚨</span><div style="flex:1"><div class="t">${esc(nameOf(k.child_id))} 왕 워닝!</div>
@@ -2672,9 +2767,11 @@ function taskItemParent(t){
 
 /* ---- store ---- */
 function childShop(){
+  const today=nyDayKey();
   const b=bal(ME.id);
   let h=`<div class="card" style="display:flex;align-items:center;justify-content:space-between">
     <h3 style="margin:0">🛍️ 스탬프 상점</h3><span class="pill gold" style="font-size:15px;padding:6px 12px">⭐ ${b}개</span></div>`;
+  h+=childNoSchoolCard(today);
   const wCnt=activeWarns(ME.id).length, sCnt=activeSads(ME.id).length, fCnt=activeFines(ME.id).length;
   const gb=goldBal(ME.id);
   h+=`<div class="card goldCard">
@@ -2701,17 +2798,17 @@ function childShop(){
       if(fCnt)parts.push(`👮 벌금 ${fCnt}개`);
       note=`<div class="needClean">${parts.join(' · ')}를 먼저 지워야 살 수 있어요</div>`;
     }else if(wk&&wk.why==='weekday'){
-      note=`<div class="needClean">🗓️ 토요일·일요일에만 살 수 있어요</div>`
+      note=`<div class="needClean">🗓️ ${SHOP_WEEKDAY_MESSAGE}</div>`
         + (gb>0?`<button class="sBtn gold" style="width:100%;margin-top:7px;padding:9px;font-size:13.5px" onclick="buyWithGold('${it.id}')">🏅 골드로 바꾸기 (${gb}개 있어요)</button>`:'');
     }else if(wk&&wk.why==='cap'){
-      note=`<div class="needClean">⏳ 오늘은 ${Math.floor(wk.used/60)}시간 다 썼어요 (하루 ${(wk.cap||WEEKEND_CAP_MIN)/60}시간까지)</div>`
+      note=`<div class="needClean">⏳ ${shopCapMessage(wk.cap)}</div>`
         + (gb>0?`<button class="sBtn gold" style="width:100%;margin-top:7px;padding:9px;font-size:13.5px" onclick="buyWithGold('${it.id}')">🏅 골드로 바꾸기 (${gb}개 있어요)</button>`:'');
     }else if(need>0){
       note=`<div class="needMore">⭐ ${need}개 더 모으면 살 수 있어요</div>`;
     }
     return `<div class="shopItem${blocked?' cant':''}"><span class="em">${it.emoji}</span>
     <div class="nm">${esc(it.name)}
-      <div style="font-size:12px;color:var(--sub);font-weight:400">⭐ ${it.cost}개${Number(it.screen_hours)?` · 📱 +${it.screen_hours}시간`:''}${it.auto_use?(Number(it.timer_minutes)?` · ⚡ 바로 ${it.timer_minutes}분 시작`:' · ⚡ 바로 사용'):' · 👤 엄마아빠 확인'}${it.weekend_only?(kidRule(ME.id).weekdayOk?` · 🗓️ 하루 ${kidRule(ME.id).cap/60}시간까지`:' · 🗓️ 주말만'):''}</div>
+      <div style="font-size:12px;color:var(--sub);font-weight:400">⭐ ${it.cost}개${Number(it.screen_hours)?` · 📱 +${it.screen_hours}시간`:''}${it.auto_use?(Number(it.timer_minutes)?` · ⚡ 바로 ${it.timer_minutes}분 시작`:' · ⚡ 바로 사용'):' · 👤 엄마아빠 확인'}${it.weekend_only?(kidRule(ME.id).weekdayOk?` · 🗓️ 하루 ${kidRule(ME.id).cap/60}시간까지`:(familyNoSchool(today)?.status==='approved'?' · 🗓️ 학교 없는 날':' · 🗓️ 주말과 학교 없는 날')):''}</div>
       ${note}</div>
     <button class="buyBtn" ${blocked?'disabled':''} onclick="buyItem('${it.id}')">${dirty?'✨':(need>0?'⭐'+need:'사기')}</button></div>`;
   }).join('')}</div>`;
@@ -3662,6 +3759,11 @@ async function denyTask(tid){await guard(async()=>{
 /* -- store -- */
 async function buyItem(itemId){await guard(async()=>{
   const it=STATE.items.find(x=>x.id===itemId);if(!it)return;
+  const blocked=weekendBlock(it);
+  if(blocked){
+    toast('🗓️',blocked.why==='weekday'?SHOP_WEEKDAY_MESSAGE:shopCapMessage(blocked.cap));
+    return;
+  }
   const have=bal(ME.id);
   {
     const w=activeWarns(ME.id).length, s=activeSads(ME.id).length, f=activeFines(ME.id).length;
@@ -3708,7 +3810,9 @@ async function buyItem(itemId){await guard(async()=>{
   const{error:tkErr}=await sb.from('fam_tickets').insert(row);
   if(tkErr){ // 티켓 발행이 실패하면 스탬프만 사라지므로 되돌려준다
     await sb.from('fam_stamp_events').insert({child_id:ME.id,delta:it.cost,kind:'adjust',reason:'구매 실패 환불: '+it.name,created_by:ME.id});
-    toast('😵','구매에 실패했어요. 스탬프는 돌려놨어요.');await refresh();return;
+    const message=tkErr.message==='no_school_or_weekend_required'?SHOP_WEEKDAY_MESSAGE:
+      tkErr.message==='weekend_cap_exceeded'?shopCapMessage(kidRule(ME.id).cap):'구매에 실패했어요.';
+    toast('😵',message+' 스탬프는 돌려놨어요.');await refresh();return;
   }
   if(auto){
     await notifyParents('🎟️',`${ME.display_name} ${it.emoji} ${it.name}`,
@@ -3754,7 +3858,7 @@ function subscribeRealtime(){
         try{new Notification(n.emoji+' '+n.title,{body:n.body||''});}catch(e){}}
       refreshSoon(); // 알림이 오면 화면 수치도 즉시 갱신
     });
-  ['fam_tasks','fam_tickets','fam_reports','fam_sticker_events','fam_stamp_events','fam_warnings','fam_king_warnings','fam_store_items','fam_sads','fam_missions','fam_mission_runs','fam_investments','fam_streak_days','fam_fines','fam_gold_events']
+  ['fam_tasks','fam_tickets','fam_reports','fam_sticker_events','fam_stamp_events','fam_warnings','fam_king_warnings','fam_store_items','fam_sads','fam_missions','fam_mission_runs','fam_investments','fam_streak_days','fam_fines','fam_gold_events','fam_no_school_days']
     .forEach(tbl=>ch.on('postgres_changes',{event:'*',schema:'public',table:tbl},()=>refreshSoon()));
   // 다른 기기에서 알림을 읽으면 이 기기의 뱃지도 함께 내려간다
   ch.on('postgres_changes',{event:'UPDATE',schema:'public',table:'fam_notifications',filter:`user_id=eq.${ME.id}`},
